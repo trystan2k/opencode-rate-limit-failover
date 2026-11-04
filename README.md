@@ -37,6 +37,102 @@ without uninstalling, prefix the plugin id: `"plugins": ["-rate-limit-failover"]
 
 ## Configure
 
+Two ways to configure, combinable:
+
+- **Option A — everything in `opencode.json`**, via plugin `options`
+- **Option B — a JSON config file** (hot-reloaded on mtime), with `options`
+  overriding it per key
+
+### Option A — everything in `opencode.json`
+
+Use the object form in `plugins` with the plugin's local path (or published
+npm/Git ref) as `package`. Complete example with every supported option:
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      // Local checkout while developing. Once published, use
+      // "github:trystan2k/opencode-rate-limit-failover" or the npm name.
+      // A bare name that is not published would be fetched from npm instead.
+      "package": "/absolute/path/to/opencode-rate-limit-failover",
+      "options": {
+        // Directed routes: failing model → fallback candidates, tried in order.
+        "routes": {
+          "openai/gpt-6-luna": ["anthropic/claude-opus-4-6"],
+          "anthropic/claude-opus-4-6": ["openai/gpt-6-luna"],
+          "openai/gpt-5.1": ["anthropic/claude-opus-4-6", "google/gemini-3-pro"]
+        },
+
+        // Bidirectional shorthand — equivalent to writing both directions:
+        // "pairs": [["openai/gpt-6-luna", "anthropic/claude-opus-4-6"]],
+
+        // HTTP statuses treated as rate limits. Default: [429].
+        "statuses": [429],
+
+        // Error-message fallback matcher for providers that signal rate
+        // limits with other statuses.
+        "pattern": "rate.?limit|too many requests|quota exceeded|overloaded",
+
+        // Built-in OpenCode retries to allow on the failing model before
+        // failing over. Default: 2.
+        "afterAttempts": 2,
+
+        // How long (ms) a model is considered unhealthy for a session after
+        // it rate-limits; also honors the provider's retry-after hint.
+        // This is the ping-pong guard for X↔Y pairs. Default: 60000.
+        "cooldownMs": 60000,
+
+        // Prompt sent to the session after switching models.
+        "continueText": "Continue where you left off.",
+
+        // "resume" (default): veto retries → execution fails → switch model → continue.
+        // "inplace" (experimental): switch model and retry immediately inside
+        //   the execution; if the runner ignores the new model, the next
+        //   retry hook firing detects it and self-corrects to resume mode.
+        "mode": "resume",
+
+        // "all" (default) or "subagents" (only sessions with a parentID).
+        "scope": "all",
+
+        // When true, add a synthetic note message to the session
+        // documenting the switch.
+        "annotate": false
+      }
+    }
+  ]
+}
+```
+
+Minimal version — routes/pairs are the only required key, everything else
+falls back to the defaults shown above:
+
+```jsonc title="opencode.jsonc"
+{
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode-rate-limit-failover",
+      "options": {
+        "pairs": [["openai/gpt-6-luna", "anthropic/claude-opus-4-6"]]
+      }
+    }
+  ]
+}
+```
+
+Notes:
+
+- Saving `opencode.json(c)` reloads the plugin, so option edits apply without
+  restarting OpenCode.
+- `routes`/`pairs` from options are **additive** with the config file's routes
+  (union, deduped); every other option **replaces** the file's value for that
+  key.
+- With this form you can leave the repo's `config.json` untouched
+  (`routes: {}`) and keep your personal mapping out of the repo.
+
+### Option B — config file
+
 The plugin reads a JSON config file, re-read with mtime caching on every
 failure — **edits apply without restarting OpenCode**. Lookup order:
 
@@ -44,61 +140,26 @@ failure — **edits apply without restarting OpenCode**. Lookup order:
 2. `config.json` in the plugin directory (repo root)
 3. `~/.config/opencode/rate-limit-failover.json`
 
-Plugin `options` (object form in `plugins`) override the file per key.
+Same schema as the `options` object above:
 
-```jsonc
+```jsonc title="config.json"
 {
-  // Directed routes: failing model → fallback candidates, tried in order.
   "routes": {
-    "openai/gpt-6-luna": ["anthropic/claude-opus-4-6"],
-    "anthropic/claude-opus-4-6": ["openai/gpt-6-luna"]
+    "openai/gpt-6-luna": ["anthropic/claude-opus-4-6"]
   },
-
-  // Bidirectional shorthand — equivalent to the two routes above:
-  // "pairs": [["openai/gpt-6-luna", "anthropic/claude-opus-4-6"]]
-
-  // HTTP statuses treated as rate limits.
   "statuses": [429],
-
-  // Error-message fallback matcher for providers that signal rate limits
-  // with other statuses.
   "pattern": "rate.?limit|too many requests|quota exceeded|overloaded",
-
-  // Built-in OpenCode retries to allow on the failing model before failing over.
   "afterAttempts": 2,
-
-  // How long (ms) a model is considered unhealthy for a session after it
-  // rate-limits (also honors the provider's retry-after hint). This is the
-  // ping-pong guard for X↔Y pairs.
   "cooldownMs": 60000,
-
-  // Prompt sent to the session after switching models.
   "continueText": "Continue where you left off.",
-
-  // "resume" (default): veto retries → execution fails → switch model → continue.
-  // "inplace" (experimental): switch model and retry immediately inside the
-  //   execution; if the runner ignores the new model, the next retry hook
-  //   firing detects it and self-corrects to resume mode.
   "mode": "resume",
-
-  // "all" (default) or "subagents" (only sessions with a parentID).
   "scope": "all",
-
-  // When true, add a synthetic note message to the session documenting the switch.
   "annotate": false
 }
 ```
 
-```jsonc title="options form"
-{
-  "plugins": [
-    {
-      "package": "/absolute/path/to/opencode-rate-limit-failover",
-      "options": { "afterAttempts": 1, "scope": "subagents" }
-    }
-  ]
-}
-```
+Options from `opencode.json` still override this file per key when both are
+used.
 
 ## Caveats
 
