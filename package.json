@@ -1,0 +1,43 @@
+{
+  "name": "opencode-rate-limit-failover",
+  "version": "0.1.0",
+  "description": "Rate-limit failover for OpenCode: switch a session to a fallback model and resume it automatically when its current model hits a rate limit, without the user or an orchestrator having to react.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Trystan2k",
+    "url": "https://github.com/trystan2k"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trystan2k/opencode-rate-limit-failover.git"
+  },
+  "bugs": {
+    "url": "https://github.com/trystan2k/opencode-rate-limit-failover/issues"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "rate-limit",
+    "failover",
+    "resilience"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.2.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "routes": {},
+  "statuses": [429],
+  "pattern": "rate.?limit|too many requests|quota exceeded|overloaded",
+  "afterAttempts": 2,
+  "cooldownMs": 60000,
+  "continueText": "Continue where you left off.",
+  "mode": "resume",
+  "scope": "all",
+  "annotate": false
+}
