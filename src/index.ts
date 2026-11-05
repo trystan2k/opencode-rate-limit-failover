@@ -17,6 +17,12 @@
  * X↔Y pair where both models are rate-limited degrades to OpenCode's normal
  * retry/backoff + error surfacing instead of looping forever.
  *
+ * Plan/usage limits that arrive without an HTTP status ("You've hit your
+ * session limit · resets 3:40pm") are caught by the message pattern, and a
+ * reset time found in the message is parsed into the cooldown hint. When a
+ * routed model fails with an error that matches neither, a one-line diagnostic
+ * names the gap so a new provider wording is easy to spot and add.
+ *
  * Config: see `configCandidates()` in ./config.ts and the README. The file is
  * re-read with mtime caching, so edits apply on the next failure without
  * reloading OpenCode. Plugin `options` (opencode.json) override the file per
@@ -24,7 +30,7 @@
  */
 
 import { Plugin } from "@opencode/plugin"
-import { createConfigLoader, compileConfig, isRateLimit, modelKey, parseModelKey, type ModelKey } from "./config.ts"
+import { createConfigLoader, compileConfig, isRateLimit, modelKey, parseModelKey, resetHintMs, type ModelKey } from "./config.ts"
 import { CooldownTracker } from "./cooldown.ts"
 
 const LOG = "[rate-limit-failover]"
@@ -111,6 +117,8 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
   const pending = new Map<string, Handoff>()
   /** in-place mode: switches awaiting proof they took effect */
   const inplaceArmed = new Map<string, Handoff>()
+  /** sessions already told about an unclassified failure on a routed model */
+  const unmatchedLogged = new Set<string>()
 
   async function scopeOk(sessionID: string, cfg: NonNullable<ReturnType<typeof compileConfig>>): Promise<boolean> {
     if (cfg.scope === "all") return true
@@ -147,7 +155,8 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
           if (!isRateLimit(event.error, cfg)) return
           if (!(await scopeOk(event.sessionID, cfg))) return
 
-          cooldown.mark(event.sessionID, fromKey, event.error?.retryAfterMs, cfg.cooldownMs)
+          const hint = event.error?.retryAfterMs ?? resetHintMs(event.error?.message)
+          cooldown.mark(event.sessionID, fromKey, hint, cfg.cooldownMs)
 
           // In-place mode: the next attempt still ran on the old model, so the
           // switch did not apply. Veto retries and hand off to the resume path.
@@ -239,16 +248,18 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
     const sessionID: string | undefined = event?.data?.sessionID
     if (!sessionID) return
 
-    if (event.type === "session.deleted") {
-      cooldown.clear(sessionID)
-      pending.delete(sessionID)
-      inplaceArmed.delete(sessionID)
-      return
-    }
     if (event.type === "session.execution.succeeded" || event.type === "session.execution.interrupted") {
       // Drop in-flight handoff/armed state; cooldowns are kept on purpose.
       pending.delete(sessionID)
       inplaceArmed.delete(sessionID)
+      unmatchedLogged.delete(sessionID)
+      return
+    }
+    if (event.type === "session.deleted") {
+      cooldown.clear(sessionID)
+      pending.delete(sessionID)
+      inplaceArmed.delete(sessionID)
+      unmatchedLogged.delete(sessionID)
       return
     }
 
@@ -260,7 +271,12 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
     if (!cfg) return
 
     const error = event.data?.error
-    if (!isRateLimit(error, cfg)) return
+    if (!isRateLimit(error, cfg)) {
+      // If the failed model has a route, this is a detection gap worth naming:
+      // a limit wording the classifier missed silently skips the failover.
+      await warnUnmatched(sessionID, error, cfg)
+      return
+    }
 
     if (!handoff) {
       // Built-in retries were exhausted (or the failure bypassed our veto).
@@ -276,7 +292,7 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
       const current = info?.model ? modelKey(info.model) : undefined
       const targets = current ? cfg.routes[current] : undefined
       if (!current || !targets?.length) return
-      cooldown.mark(sessionID, current, error?.retryAfterMs, cfg.cooldownMs)
+      cooldown.mark(sessionID, current, error?.retryAfterMs ?? resetHintMs(error?.message), cfg.cooldownMs)
       const target = cooldown.pickHealthy(sessionID, targets)
       if (!target) {
         log(`${sessionID}: rate limit on ${current} but every target is within cooldown; surfacing the error`)
@@ -305,6 +321,41 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
     } catch (cause) {
       console.error(`${LOG} ${sessionID}: failed to send the continue prompt`, cause)
     }
+  }
+
+  /**
+   * One-line diagnostic when a model that has a configured route fails with an
+   * error that the classifier did not recognize as a rate limit. Logged at
+   * most once per session (reset on success/deletion) so noisy non-limit
+   * failures don't spam the log.
+   */
+  async function warnUnmatched(
+    sessionID: string,
+    error: unknown,
+    cfg: NonNullable<ReturnType<typeof compileConfig>>,
+  ): Promise<void> {
+    if (unmatchedLogged.has(sessionID)) return
+    unmatchedLogged.add(sessionID)
+    let current: ModelKey | undefined
+    try {
+      const info = await ctx.session.get({ sessionID })
+      current = info?.model ? modelKey(info.model) : undefined
+    } catch {
+      unmatchedLogged.delete(sessionID)
+      return
+    }
+    const targets = current ? cfg.routes[current] : undefined
+    if (!current || !targets?.length) {
+      unmatchedLogged.delete(sessionID) // not routed; nothing to report
+      return
+    }
+    const e = (error ?? {}) as { type?: unknown; status?: unknown; message?: unknown }
+    const message = typeof e.message === "string" ? e.message.slice(0, 200) : String(e.message)
+    log(
+      `${sessionID}: ${current} failed but the error was not classified as a rate limit, so the ` +
+        `route to ${targets.join(", ")} was not used — consider extending "pattern" ` +
+        `(type=${JSON.stringify(e.type ?? null)}, status=${JSON.stringify(e.status ?? null)}, message=${JSON.stringify(message)})`,
+    )
   }
 
   function log(...parts: unknown[]): void {

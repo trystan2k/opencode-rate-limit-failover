@@ -33,7 +33,10 @@ export interface FailoverConfig {
 
 export type RawOptions = Record<string, unknown> | undefined
 
-export const DEFAULT_PATTERN = "rate.?limit|too many requests|quota exceeded|overloaded"
+export const DEFAULT_PATTERN =
+  "rate.?limit|too many requests|quota (?:exceeded|exhausted)|insufficient[ _]quota|" +
+  "(?:session|usage|daily|weekly|monthly|request|message|token|credit|plan|spending)s? +limit|" +
+  "hit (?:your|the|a) +limit|limit +(?:has +been +)?(?:reached|exceeded)|overloaded|resource[ _-]?exhaust"
 export const DEFAULT_CONTINUE_TEXT = "Continue where you left off."
 export const CONFIG_ENV = "RATE_LIMIT_FAILOVER_CONFIG"
 
@@ -142,6 +145,60 @@ export function isRateLimit(error: unknown, cfg: FailoverConfig): boolean {
   if (typeof e?.status === "number" && cfg.statuses.includes(e.status)) return true
   if (cfg.pattern && typeof e?.message === "string" && cfg.pattern.test(e.message)) return true
   return false
+}
+
+// ─── Reset-time hints ────────────────────────────────────────────────────────
+
+/** Absolute reset timestamp, e.g. "Resets at 2026-11-05T14:40:00.000Z". */
+const ISO_RESET_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?\b/
+
+/** Relative delay, e.g. "resets in 2 hours", "try again in 23 minutes". */
+const RELATIVE_RESET_RE =
+  /\b(?:resets? +(?:in|after)|re-?try[^.]{0,20}?in|try +again[^.]{0,20}?in) +(\d+) +(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\b/i
+
+const RESET_UNITS: Record<string, number> = {
+  s: 1_000,
+  sec: 1_000,
+  secs: 1_000,
+  second: 1_000,
+  seconds: 1_000,
+  m: 60_000,
+  min: 60_000,
+  mins: 60_000,
+  minute: 60_000,
+  minutes: 60_000,
+  h: 3_600_000,
+  hr: 3_600_000,
+  hrs: 3_600_000,
+  hour: 3_600_000,
+  hours: 3_600_000,
+  d: 86_400_000,
+  day: 86_400_000,
+  days: 86_400_000,
+}
+
+/**
+ * Parse a "when can we retry" hint out of an error message: an absolute reset
+ * timestamp ("You've hit your session limit … Resets at 2026-11-05T14:40:00.000Z")
+ * or a relative delay ("try again in 23 minutes"). Returns the ms to wait,
+ * `0` when a parsed reset time has already passed, or `undefined` when the
+ * message carries no usable hint. Providers that don't send `retryAfterMs`
+ * still get an accurate cooldown this way.
+ */
+export function resetHintMs(message: string | undefined, now = Date.now()): number | undefined {
+  if (!message) return undefined
+  const iso = ISO_RESET_RE.exec(message)
+  if (iso) {
+    const resetAt = Date.parse(iso[0])
+    if (Number.isFinite(resetAt)) return Math.max(resetAt - now, 0)
+  }
+  const rel = RELATIVE_RESET_RE.exec(message)
+  if (rel?.[1] && rel[2]) {
+    const amount = Number.parseInt(rel[1], 10)
+    const unit = RESET_UNITS[rel[2].toLowerCase()]
+    if (Number.isFinite(amount) && unit) return amount * unit
+  }
+  return undefined
 }
 
 // ─── Config file loading ─────────────────────────────────────────────────────

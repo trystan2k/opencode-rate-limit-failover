@@ -5,6 +5,7 @@ import {
   isRateLimit,
   modelKey,
   parseModelKey,
+  resetHintMs,
   DEFAULT_CONTINUE_TEXT,
   DEFAULT_PATTERN,
 } from "../src/config.ts"
@@ -104,6 +105,49 @@ test("isRateLimit matches status, then message pattern, then rejects", () => {
   assert.equal(isRateLimit({ status: 500, message: "connection reset" }, cfg), false)
   assert.equal(isRateLimit(undefined, cfg), false)
   assert.equal(isRateLimit({ status: 429 }, cfg), true)
+})
+
+test("isRateLimit matches plan/usage limit wording without an HTTP status", () => {
+  const cfg = compileConfig({ routes: { "a/x": ["b/y"] } }, undefined)!
+  // Observed in the wild (PAF-14 kickoff, 2026-11-05): claude-agent/sonnet plan limit.
+  assert.equal(
+    isRateLimit(
+      {
+        type: "provider.unknown",
+        message: "You've hit your session limit · resets 3:40pm (Europe/Madrid) Resets at 2026-11-05T14:40:00.000Z.",
+      },
+      cfg,
+    ),
+    true,
+  )
+  assert.equal(isRateLimit({ type: "provider.unknown", message: "usage limit reached for this model" }, cfg), true)
+  assert.equal(isRateLimit({ message: "insufficient_quota: check your billing details" }, cfg), true)
+  assert.equal(isRateLimit({ message: "RESOURCE_EXHAUSTED" }, cfg), true)
+  assert.equal(isRateLimit({ message: "you have hit your limit for today" }, cfg), true)
+  assert.equal(isRateLimit({ message: "context length exceeded" }, cfg), false)
+  assert.equal(isRateLimit({ message: "invalid api key" }, cfg), false)
+  assert.equal(isRateLimit({ message: "connection reset by peer" }, cfg), false)
+})
+
+test("resetHintMs parses absolute reset timestamps", () => {
+  const now = Date.parse("2026-11-05T11:43:00.000Z")
+  const hint = resetHintMs(
+    "You've hit your session limit · resets 3:40pm (Europe/Madrid) Resets at 2026-11-05T14:40:00.000Z.",
+    now,
+  )
+  assert.equal(hint, Date.parse("2026-11-05T14:40:00.000Z") - now) // 2h57m
+  // A reset time that has already passed is a "healthy now" hint.
+  assert.equal(resetHintMs("Resets at 2026-11-04T00:00:00.000Z", now), 0)
+})
+
+test("resetHintMs parses relative delays or returns undefined", () => {
+  const now = Date.now()
+  assert.equal(resetHintMs("Please retry in 30 seconds", now), 30_000)
+  assert.equal(resetHintMs("try again in 23 minutes", now), 23 * 60_000)
+  assert.equal(resetHintMs("resets in 2 hours", now), 2 * 3_600_000)
+  assert.equal(resetHintMs("resets after 1 day", now), 86_400_000)
+  assert.equal(resetHintMs("connection reset by peer", now), undefined)
+  assert.equal(resetHintMs(undefined, now), undefined)
 })
 
 test("modelKey and parseModelKey round trip", () => {
