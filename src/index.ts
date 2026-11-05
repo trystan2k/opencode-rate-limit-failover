@@ -23,6 +23,12 @@
  * routed model fails with an error that matches neither, a one-line diagnostic
  * names the gap so a new provider wording is easy to spot and add.
  *
+ * Loop guard: a handoff that doesn't take effect (e.g. the session's agent
+ * pins its model in frontmatter, so every execution ignores the switched
+ * session model) would otherwise switch + re-prompt in a tight loop on every
+ * recurring failure. Identical handoffs are spaced out exponentially and
+ * stopped after 3 consecutive attempts until an execution succeeds again.
+ *
  * Config: see `configCandidates()` in ./config.ts and the README. The file is
  * re-read with mtime caching, so edits apply on the next failure without
  * reloading OpenCode. Plugin `options` (opencode.json) override the file per
@@ -31,12 +37,17 @@
 
 import { Plugin } from "@opencode/plugin"
 import { createConfigLoader, compileConfig, isRateLimit, modelKey, parseModelKey, resetHintMs, type ModelKey } from "./config.ts"
-import { CooldownTracker } from "./cooldown.ts"
+import { CooldownTracker, HandoffGuard } from "./cooldown.ts"
 
 const LOG = "[rate-limit-failover]"
 
 const EVENT_RETRY_MIN_MS = 50
 const EVENT_RETRY_MAX_MS = 5000
+
+/** Consecutive identical handoffs allowed before the guard blocks further attempts. */
+const HANDOFF_MAX_ATTEMPTS = 3
+/** Upper bound for the exponential backoff between repeated handoffs. */
+const HANDOFF_BACKOFF_CAP_MS = 30 * 60_000
 
 /** Shape of the `retry` hook event (see docs/build/plugins/server#retry-policy). */
 interface RetryEvent {
@@ -113,6 +124,10 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
   }
 
   const cooldown = new CooldownTracker()
+  /** loop guard: spaces out / stops repeated identical handoffs */
+  const handoffs = new HandoffGuard(HANDOFF_MAX_ATTEMPTS)
+  /** last time we logged a blocked handoff, per session (throttle) */
+  const blockedLoggedAt = new Map<string, number>()
   /** resume mode: vetoes waiting for the execution to fail */
   const pending = new Map<string, Handoff>()
   /** in-place mode: switches awaiting proof they took effect */
@@ -185,10 +200,16 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
             )
             return
           }
+          if (handoffs.blocked(event.sessionID, fromKey, target, cfg.cooldownMs, HANDOFF_BACKOFF_CAP_MS)) {
+            // A recent identical handoff did not help; don't veto OpenCode's retries.
+            logBlockedHandoff(event.sessionID, fromKey, target)
+            return
+          }
 
           if (cfg.mode === "inplace") {
             try {
               await ctx.session.switchModel({ sessionID: event.sessionID, model: parseModelKey(target) })
+              handoffs.mark(event.sessionID, fromKey, target)
               inplaceArmed.set(event.sessionID, { from: fromKey, to: target })
               event.decision = { retry: true, delay: 0 }
               log(
@@ -249,10 +270,13 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
     if (!sessionID) return
 
     if (event.type === "session.execution.succeeded" || event.type === "session.execution.interrupted") {
-      // Drop in-flight handoff/armed state; cooldowns are kept on purpose.
+      // Drop in-flight handoff/armed state and loop guards; cooldowns are kept
+      // on purpose.
       pending.delete(sessionID)
       inplaceArmed.delete(sessionID)
       unmatchedLogged.delete(sessionID)
+      handoffs.clear(sessionID)
+      blockedLoggedAt.delete(sessionID)
       return
     }
     if (event.type === "session.deleted") {
@@ -260,6 +284,8 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
       pending.delete(sessionID)
       inplaceArmed.delete(sessionID)
       unmatchedLogged.delete(sessionID)
+      handoffs.clear(sessionID)
+      blockedLoggedAt.delete(sessionID)
       return
     }
 
@@ -301,12 +327,21 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
       handoff = { from: current, to: target }
     }
 
+    if (handoffs.blocked(sessionID, handoff.from, handoff.to, cfg.cooldownMs, HANDOFF_BACKOFF_CAP_MS)) {
+      // The same handoff was just attempted (and did not help — e.g. the
+      // session's agent pins its model). Surface the error instead of
+      // switching + re-prompting in a tight loop.
+      logBlockedHandoff(sessionID, handoff.from, handoff.to)
+      return
+    }
+
     try {
       await ctx.session.switchModel({ sessionID, model: parseModelKey(handoff.to) })
     } catch (cause) {
       console.error(`${LOG} ${sessionID}: could not switch model to ${handoff.to}`, cause)
       return
     }
+    handoffs.mark(sessionID, handoff.from, handoff.to)
     if (cfg.annotate) {
       await ctx.session
         .synthetic({
@@ -355,6 +390,24 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
       `${sessionID}: ${current} failed but the error was not classified as a rate limit, so the ` +
         `route to ${targets.join(", ")} was not used — consider extending "pattern" ` +
         `(type=${JSON.stringify(e.type ?? null)}, status=${JSON.stringify(e.status ?? null)}, message=${JSON.stringify(message)})`,
+    )
+  }
+
+  /**
+   * Throttled (one line per 5s per session) notice that a failover was skipped
+   * because the same handoff was just attempted and did not take effect —
+   * typically because the session's agent pins its model.
+   */
+  function logBlockedHandoff(sessionID: string, from: ModelKey, to: ModelKey): void {
+    const now = Date.now()
+    if (now - (blockedLoggedAt.get(sessionID) ?? 0) < 5_000) return
+    blockedLoggedAt.set(sessionID, now)
+    const reason = handoffs.exhausted(sessionID, from, to)
+      ? `stopped after ${HANDOFF_MAX_ATTEMPTS} attempts`
+      : "backing off"
+    log(
+      `${sessionID}: failover ${from} → ${to} skipped (${reason}); the switch may not take effect ` +
+        `(e.g. the session's agent pins its model) — surfacing errors until an execution succeeds`,
     )
   }
 

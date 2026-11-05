@@ -83,6 +83,9 @@ npm/Git ref) as `package`. Complete example with every supported option:
         // it rate-limits; also honors the provider's retry-after hint, or a
         // reset time / delay parsed from the error message (e.g. "Resets at
         // 2026-11-05T14:40:00.000Z", "try again in 23 minutes").
+        // Also the base for the backoff between repeated identical failovers
+        // (doubling per attempt, capped at 30 min, max 3 attempts) when a
+        // switch does not take effect — e.g. an agent that pins its model.
         // This is the ping-pong guard for X↔Y pairs. Default: 60000.
         "cooldownMs": 60000,
 
@@ -175,6 +178,13 @@ used.
   failure hit is retried as a fresh step from the last complete state.
 - **Context window**: pick fallbacks with comparable context, or expect
   compaction when a long session moves to a smaller model.
+- **Agent-pinned models**: if a session's agent pins its model in frontmatter,
+  `switchModel` cannot change what actually runs. The plugin detects the
+  recurring identical failure and stops retrying the same handoff — backoff
+  doubles per attempt starting at `cooldownMs` (capped at 30 minutes), and
+  after 3 consecutive attempts it stops entirely and surfaces the error until
+  an execution succeeds. Prefer un-pinning the agent's model (or running
+  subagents in background mode) if you want failover to work there.
 - **Health note**: a model in cooldown is skipped only as a *target*; OpenCode's
   own retries still run on the failing model for the first `afterAttempts` attempts.
 - **Limit wording**: plan/usage limits often arrive without an HTTP status and
