@@ -29,6 +29,12 @@
  * recurring failure. Identical handoffs are spaced out exponentially and
  * stopped after 3 consecutive attempts until an execution succeeds again.
  *
+ * Parent visibility: when a subagent session is failed over, its parent's
+ * `subagent` tool call has already returned the failure, so the parent would
+ * otherwise report the task as lost. The plugin leaves a synthetic note in the
+ * parent session pointing at the resumed child (disable with
+ * `"notifyParent": false`).
+ *
  * Config: see `configCandidates()` in ./config.ts and the README. The file is
  * re-read with mtime caching, so edits apply on the next failure without
  * reloading OpenCode. Plugin `options` (opencode.json) override the file per
@@ -355,6 +361,31 @@ async function setupPlugin(ctx: PluginContext): Promise<() => Promise<void>> {
       log(`${sessionID}: switched ${handoff.from} → ${handoff.to} and resumed with a continue prompt`)
     } catch (cause) {
       console.error(`${LOG} ${sessionID}: failed to send the continue prompt`, cause)
+    }
+
+    // Make the handoff visible to a parent orchestrator: a foreground subagent
+    // tool call already returned the failure, so the parent may otherwise give
+    // up on the child without ever seeing the resumed result.
+    if (cfg.notifyParent) {
+      try {
+        const info = await ctx.session.get({ sessionID })
+        const parentID: string | undefined = info?.parentID
+        if (parentID) {
+          await ctx.session
+            .synthetic({
+              sessionID: parentID,
+              text:
+                `${LOG}: the subagent session ${sessionID} hit a rate limit on ${handoff.from}; ` +
+                `it was switched to ${handoff.to} and resumed automatically. Its earlier tool call ` +
+                `in this session errored, but the work continued in the child session — ` +
+                `re-check ${sessionID} for its result instead of assuming the task failed.`,
+            })
+            .catch(() => {})
+          log(`${sessionID}: notified parent session ${parentID} about the failover`)
+        }
+      } catch (cause) {
+        console.error(`${LOG} ${sessionID}: could not notify the parent session`, cause)
+      }
     }
   }
 

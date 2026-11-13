@@ -29,6 +29,8 @@ export interface FailoverConfig {
   scope: "all" | "subagents"
   /** Add a synthetic note message to the session documenting the switch. */
   annotate: boolean
+  /** When a child session is failed over, notify its parent session (default: on). */
+  notifyParent: boolean
 }
 
 export type RawOptions = Record<string, unknown> | undefined
@@ -124,6 +126,8 @@ export function compileConfig(raw: unknown, options: RawOptions): FailoverConfig
   const scope =
     options?.scope === "subagents" || (raw as { scope?: unknown } | null)?.scope === "subagents" ? "subagents" : "all"
   const annotate = options?.annotate === true || (raw as { annotate?: unknown } | null)?.annotate === true
+  const notifyParentRaw = options?.notifyParent ?? (raw as { notifyParent?: unknown } | null)?.notifyParent
+  const notifyParent = notifyParentRaw === undefined ? true : notifyParentRaw === true
 
   return {
     routes,
@@ -135,6 +139,7 @@ export function compileConfig(raw: unknown, options: RawOptions): FailoverConfig
     mode,
     scope,
     annotate,
+    notifyParent,
   }
 }
 

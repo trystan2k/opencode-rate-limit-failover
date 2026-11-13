@@ -63,6 +63,14 @@ test("defaults are applied", () => {
   assert.equal(cfg?.mode, "resume")
   assert.equal(cfg?.scope, "all")
   assert.equal(cfg?.annotate, false)
+  assert.equal(cfg?.notifyParent, true)
+})
+
+test("notifyParent defaults on and can be turned off from options or file", () => {
+  assert.equal(compileConfig({ routes: { "a/x": ["b/y"] } }, undefined)?.notifyParent, true)
+  assert.equal(compileConfig({ routes: { "a/x": ["b/y"] }, notifyParent: false }, undefined)?.notifyParent, false)
+  assert.equal(compileConfig({ routes: { "a/x": ["b/y"] } }, { notifyParent: false })?.notifyParent, false)
+  assert.equal(compileConfig({ routes: { "a/x": ["b/y"] }, notifyParent: false }, { notifyParent: true })?.notifyParent, true)
 })
 
 test("statuses are sanitized; an empty list falls back to 429", () => {

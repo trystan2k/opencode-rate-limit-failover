@@ -103,7 +103,12 @@ npm/Git ref) as `package`. Complete example with every supported option:
 
         // When true, add a synthetic note message to the session
         // documenting the switch.
-        "annotate": false
+        "annotate": false,
+
+        // When a child (subagent) session is failed over, also leave a note
+        // in its parent session so an orchestrator knows the work continued.
+        // Default: true.
+        "notifyParent": true
       }
     }
   ]
@@ -169,10 +174,12 @@ used.
 ## Caveats
 
 - **Foreground subagents**: in `resume` mode the child execution fails for a
-  moment before the plugin resumes it, so a foreground `subagent` tool call may
-  return an error to the parent while the child continues on the fallback
-  model. Run subagents in `background` mode, or try `"mode": "inplace"`, if
-  this matters for your orchestrator.
+  moment before the plugin resumes it, so a foreground `subagent` tool call
+  still returns an error to the parent while the child continues on the
+  fallback model. To keep the parent in the loop, the plugin leaves a note in
+  the parent session about the resumed child (`"notifyParent": true` by
+  default) — orchestrator protocols should re-check the child session when
+  they see it. Try `"mode": "inplace"` if a same-tick switch matters more.
 - **Partial responses**: everything *completed* before the rate limit persists
   (messages, tool results, file edits). A response that was streaming when the
   failure hit is retried as a fresh step from the last complete state.
